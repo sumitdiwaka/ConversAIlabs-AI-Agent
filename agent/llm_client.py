@@ -37,7 +37,7 @@ class LLMClient:
         self.base_url = base_url or os.environ.get(
             "LLM_BASE_URL", "https://api.groq.com/openai/v1"
         )
-        self.model = model or os.environ.get("LLM_MODEL", "llama-3.3-70b-versatile")
+        self.model = model or os.environ.get("LLM_MODEL", "llama-3.1-8b-instant")
 
         if not self.api_key:
             raise ValueError(
@@ -50,9 +50,6 @@ class LLMClient:
     def chat(self, messages: list[dict], tools: list[dict], max_retries: int = 5) -> Any:
         """
         Send the conversation to the model and return the raw response message.
-        Automatically retries on rate-limit errors and recovers from a few
-        known provider quirks (daily quota exceeded, malformed tool calls,
-        request-too-large).
         """
         import openai
 
@@ -64,7 +61,7 @@ class LLMClient:
                     tools=tools,
                     tool_choice="auto",
                     temperature=0.2,
-                    max_tokens=4096,
+                    max_tokens=2048,
                 )
                 return response.choices[0].message
             except openai.RateLimitError as e:
@@ -101,16 +98,17 @@ class LLMClient:
                 raise
             except openai.APIStatusError as e:
                 if e.status_code == 413 and attempt < max_retries:
-                    trimmed = _trim_large_tool_outputs(messages)
-                    print(f"[too large] trimmed {trimmed} old tool output(s) to fit the "
+                    keep_n = max(0, 2 - attempt)
+                    trimmed_tool = _trim_large_tool_outputs(messages, keep_last_n=keep_n)
+                    trimmed_calls = _trim_large_tool_call_arguments(messages, keep_last_n=keep_n)
+                    total = trimmed_tool + trimmed_calls
+                    print(f"[too large] trimmed {total} old message(s) to fit the "
                           f"token budget, retrying ({attempt + 1}/{max_retries})...")
                     continue
                 raise
 
 
 def _extract_retry_seconds(error_text: str, allow_minutes: bool = False) -> float | None:
-    """Parse a 'try again in 3.345s' or 'try again in 28m4.8s' style hint
-    out of a provider error message."""
     if allow_minutes:
         match = re.search(r"try again in (?:(\d+)m)?([\d.]+)s", error_text)
         if match:
@@ -124,13 +122,36 @@ def _extract_retry_seconds(error_text: str, allow_minutes: bool = False) -> floa
     return None
 
 
+def _trim_large_tool_call_arguments(
+    messages: list[dict], keep_last_n: int = 1, min_len_to_trim: int = 300
+) -> int:
+    assistant_indices = [
+        i for i, m in enumerate(messages)
+        if m.get("role") == "assistant" and m.get("tool_calls")
+    ]
+    to_trim = assistant_indices[:-keep_last_n] if len(assistant_indices) > keep_last_n else []
+    trimmed_count = 0
+    for i in to_trim:
+        for tc in messages[i]["tool_calls"]:
+            fn = tc.get("function", {})
+            if fn.get("name") != "write_file":
+                continue
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                continue
+            content = args.get("content", "")
+            if isinstance(content, str) and len(content) > min_len_to_trim:
+                path = args.get("path", "?")
+                args["content"] = f"[{len(content)} chars already written to {path} -- omitted here to save space]"
+                fn["arguments"] = json.dumps(args)
+                trimmed_count += 1
+    return trimmed_count
+
+
 def _trim_large_tool_outputs(
     messages: list[dict], keep_last_n: int = 2, min_len_to_trim: int = 400
 ) -> int:
-    """
-    Shrink older 'tool' role message contents in place, keeping only the
-    most recent `keep_last_n` tool messages intact, to reduce token usage.
-    """
     tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
     to_trim = tool_indices[:-keep_last_n] if len(tool_indices) > keep_last_n else []
     trimmed_count = 0
@@ -145,11 +166,6 @@ def _trim_large_tool_outputs(
 
 
 class MockLLM:
-    """
-    Deterministic, fully-offline stand-in for a real LLM. Used for local
-    testing/demo of the agent harness without needing network access.
-    """
-
     def __init__(self, script: list[dict]):
         self._script = script
         self._step = 0
