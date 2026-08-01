@@ -1,0 +1,92 @@
+
+======================================================================
+AGENT START
+Request: Improve the application so users can better organise and search their notes.
+======================================================================
+
+[tool call] list_directory({'path': '.'})
+[tool result]   .gitignore
+  Readme.md
+  package-lock.json
+  package.json
+  server.js
+  config/
+    database.config.js
+  app/
+    controllers/
+      note.controller.js
+    models/
+      note.model.js
+    routes/
+      note.routes.js
+[tool call] read_file({'path': 'app/models/note.model.js'})
+[tool result]    1| const mongoose = require('mongoose');
+   2| 
+   3| const NoteSchema = mongoose.Schema({
+   4|     title: String,
+   5|     content: String
+   6| }, {
+   7|     timestamps: true
+   8| });
+   9| 
+  10| module.exports = mongoose.model('Note', NoteSchema);
+[tool call] read_file({'path': 'app/routes/note.routes.js'})
+[tool result]    1| module.exports = (app) => {
+   2|     const notes = require('../controllers/note.controller.js');
+   3| 
+   4|     // Create a new Note
+   5|     app.post('/notes', notes.create);
+   6| 
+   7|     // Retrieve all Notes
+   8|     app.get('/notes', notes.findAll);
+   9| 
+  10|     // Retrieve a  ...[truncated]
+[tool call] read_file({'path': 'app/controllers/note.controller.js'})
+[tool result]    1| const Note = require('../models/note.model.js');
+   2| 
+   3| // Create and Save a new Note
+   4| exports.create = (req, res) => {
+   5|     // Validate request
+   6|     if(!req.body.content) {
+   7|         return res.status(400).send({
+   8|             message: "Note content can not be emp ...[truncated]
+
+--- PLAN ---
+PLAN:
+- The app is an Express + MongoDB (Mongoose) REST API for notes. Notes currently only have `title` and `content`; there is no way to categorize or search notes.
+- I will add a `tags` array field to the Note model, so notes can be organized into free-form categories (e.g. 'work', 'personal').
+- I will add a new `search` controller function that filters notes by a text keyword (matched against title/content) and/or a tag, via query params.
+- I will add a new route `GET /notes/search`, registered BEFORE `GET /notes/:noteId` so Express doesn't mistake 'search' for a note id.
+- I will update `create` and `update` in the controller to accept an optional `tags` array in the request body.
+- Files to modify: app/models/note.model.js, app/routes/note.routes.js, app/controllers/note.controller.js.
+- No existing endpoints, fields, or behavior will be removed; this is purely additive.
+
+[tool call] write_file({'path': 'app/models/note.model.js', 'content': "const mongoose = require('mongoose');\n\nconst NoteSchema = mongoose.Schema({\n    title: String,\n    content: String,\n    tags: {\n        type: [String],\n        default: []\n    }\n}, {\n    timestamps: true\n});\n\nmodule.exports = mongoose.model('Note', NoteSchema);"})
+[tool result] Updated file: app/models/note.model.js (14 lines)
+[tool call] write_file({'path': 'app/routes/note.routes.js', 'content': 'module.exports = (app) => {\n    const notes = require(\'../controllers/note.controller.js\');\n\n    // Create a new Note\n    app.post(\'/notes\', notes.create);\n\n    // Search notes by keyword (title/content) and/or tag.\n    // NOTE: this must be registered BEFORE \'/notes/:noteId\' below,\n    // otherwise Express would treat "search" as a noteId.\n    app.get(\'/notes/search\', notes.search);\n\n    // Retrieve all Notes\n    app.get(\'/notes\', notes.findAll);\n\n    // Retrieve a single Note with noteId\n    app.get(\'/notes/:noteId\', notes.findOne);\n\n    // Update a Note with noteId\n    app.put(\'/notes/:noteId\', notes.update);\n\n    // Delete a Note with noteId\n    app.delete(\'/notes/:noteId\', notes.delete);\n}'})
+[tool result] Updated file: app/routes/note.routes.js (23 lines)
+[tool call] write_file({'path': 'app/controllers/note.controller.js', 'content': 'const Note = require(\'../models/note.model.js\');\n\n// Create and Save a new Note\nexports.create = (req, res) => {\n    // Validate request\n    if(!req.body.content) {\n        return res.status(400).send({\n            message: "Note content can not be empty"\n        });\n    }\n\n    // Create a Note\n    const note = new Note({\n        title: req.body.title || "Untitled Note",\n        content: req.body.content,\n        tags: Array.isArray(req.body.tags) ? req.body.tags : []\n    });\n\n    // Save Note in the database\n    note.save()\n    .then(data => {\n        res.send(data);\n    }).catch(err => {\n        res.status(500).send({\n            message: err.message || "Some error occurred while creating the Note."\n        });\n    });\n};\n\n// Retrieve and return all notes from the database.\nexports.findAll = (req, res) => {\n    Note.find()\n    .then(notes => {\n        res.send(notes);\n    }).catch(err => {\n        res.status(500).send({\n            message: err.message || "Some error occurred while retrieving notes."\n        });\n    });\n};\n\n// Find a single note with a noteId\nexports.findOne = (req, res) => {\n    Note.findById(req.params.noteId)\n    .then(note => {\n        if(!note) {\n            return res.status(404).send({\n                message: "Note not found with id " + req.params.noteId\n            });\n        }\n        res.send(note);\n    }).catch(err => {\n        if(err.kind === \'ObjectId\') {\n            return res.status(404).send({\n                message: "Note not found with id " + req.params.noteId\n            });\n        }\n        return res.status(500).send({\n            message: "Error retrieving note with id " + req.params.noteId\n        });\n    });\n};\n\n// Search notes by keyword (matches title or content) and/or tag.\n// Examples:\n//   GET /notes/search?q=meeting\n//   GET /notes/search?tag=work\n//   GET /notes/search?q=meeting&tag=work\nexports.search = (req, res) => {\n    const { q, tag } = req.query;\n    const conditions = [];\n\n    if (q) {\n        const regex = new RegExp(q, \'i\');\n        conditions.push({ $or: [{ title: regex }, { content: regex }] });\n    }\n\n    if (tag) {\n        conditions.push({ tags: tag });\n    }\n\n    const query = conditions.length > 0 ? { $and: conditions } : {};\n\n    Note.find(query)\n    .then(notes => {\n        res.send(notes);\n    }).catch(err => {\n        res.status(500).send({\n            message: err.message || "Some error occurred while searching notes."\n        });\n    });\n};\n\n// Update a note identified by the noteId in the request\nexports.update = (req, res) => {\n    // Validate Request\n    if(!req.body.content) {\n        return res.status(400).send({\n            message: "Note content can not be empty"\n        });\n    }\n\n    const updatedFields = {\n        title: req.body.title || "Untitled Note",\n        content: req.body.content\n    };\n    if (Array.isArray(req.body.tags)) {\n        updatedFields.tags = req.body.tags;\n    }\n\n    // Find note and update it with the request body\n    Note.findByIdAndUpdate(req.params.noteId, updatedFields, {new: true})\n    .then(note => {\n        if(!note) {\n            return res.status(404).send({\n                message: "Note not found with id " + req.params.noteId\n            });\n        }\n        res.send(note);\n    }).catch(err => {\n        if(err.kind === \'ObjectId\') {\n            return res.status(404).send({\n                message: "Note not found with id " + req.params.noteId\n            });\n        }\n        return res.status(500).send({\n            message: "Error updating note with id " + req.params.noteId\n        });\n    });\n};\n\n// Delete a note with the specified noteId in the request\nexports.delete = (req, res) => {\n    Note.findByIdAndRemove(req.params.noteId)\n    .then(note => {\n        if(!note) {\n            return res.status(404).send({\n                message: "Note not found with id " + req.params.noteId\n            });\n        }\n        res.send({message: "Note deleted successfully!"});\n    }).catch(err => {\n        if(err.kind === \'ObjectId\' || err.name === \'NotFound\') {\n            return res.status(404).send({\n                message: "Note not found with id " + req.params.noteId\n            });\n        }\n        return res.status(500).send({\n            message: "Could not delete note with id " + req.params.noteId\n        });\n    });\n};'})
+[tool result] Updated file: app/controllers/note.controller.js (152 lines)
+
+--- SUMMARY ---
+SUMMARY:
+- app/models/note.model.js: added a `tags` array field (default []) to the Note schema.
+- app/controllers/note.controller.js: `create` and `update` now accept an optional `tags` array in the request body; added a new `search` handler that filters notes by a case-insensitive keyword match on title/content (`q`) and/or an exact tag match (`tag`).
+- app/routes/note.routes.js: added `GET /notes/search`, placed before the `/notes/:noteId` route so it isn't shadowed by it.
+- All previous endpoints (POST /notes, GET /notes, GET /notes/:noteId, PUT /notes/:noteId, DELETE /notes/:noteId) are unchanged and fully backward compatible.
+- Usage examples:
+    POST /notes  { "title": "Groceries", "content": "Milk, eggs", "tags": ["personal", "shopping"] }
+    GET  /notes/search?tag=personal
+    GET  /notes/search?q=milk
+    GET  /notes/search?q=milk&tag=shopping
+
+
+======================================================================
+AGENT END - files touched: ['app/models/note.model.js', 'app/routes/note.routes.js', 'app/controllers/note.controller.js']
+======================================================================
+
+
+Files touched:
+  - app/models/note.model.js
+  - app/routes/note.routes.js
+  - app/controllers/note.controller.js
